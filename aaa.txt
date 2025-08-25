@@ -1,0 +1,292 @@
+# import pyodbc
+# import configparser
+# from datetime import datetime
+# from pyexcelerate import Workbook
+# import os
+# import logging
+# from logging.handlers import TimedRotatingFileHandler
+# # 邮件相关库
+# import smtplib
+# from email.mime.text import MIMEText
+# from email.mime.multipart import MIMEMultipart
+# from email.header import Header
+# from email.utils import formataddr
+#
+#
+# # --------------------------
+# # 1. 日志初始化（按日滚动）
+# # --------------------------
+# def init_logging():
+#     # 创建logs目录（不存在则创建）
+#     if not os.path.exists('logs'):
+#         os.makedirs('logs')
+#
+#     # 日志文件路径：logs/2025-08-25.log
+#     log_filename = os.path.join('logs', f"{datetime.now().strftime('%Y-%m-%d')}.log")
+#
+#     # 按天滚动日志，保留30天
+#     handler = TimedRotatingFileHandler(
+#         log_filename,
+#         when='midnight',
+#         interval=1,
+#         backupCount=30,
+#         encoding='utf-8'
+#     )
+#
+#     # 日志格式：时间 - 级别 - 内容
+#     formatter = logging.Formatter(
+#         '%(asctime)s - %(levelname)s - %(message)s',
+#         datefmt='%Y-%m-%d %H:%M:%S'
+#     )
+#     handler.setFormatter(formatter)
+#
+#     # 配置根日志
+#     logger = logging.getLogger()
+#     logger.setLevel(logging.INFO)
+#     logger.addHandler(handler)
+#
+#     return logger
+#
+#
+# # --------------------------
+# # 2. 读取配置文件（数据库+邮件）
+# # --------------------------
+# def read_config(config_file='config.ini'):
+#     logger = logging.getLogger()
+#     try:
+#         config = configparser.ConfigParser()
+#         config.read(config_file, encoding='utf-8')
+#
+#         # 检查必要配置段
+#         required_sections = ['Database', 'Email']
+#         for section in required_sections:
+#             if section not in config.sections():
+#                 raise Exception(f"配置文件中缺少[{section}]配置段")
+#
+#         # 读取数据库配置
+#         db_config = {
+#             'server': config.get('Database', 'server'),
+#             'database': config.get('Database', 'database'),
+#             'username': config.get('Database', 'username'),
+#             'password': config.get('Database', 'password'),
+#             'driver': config.get('Database', 'driver', fallback='{SQL Server Native Client 10.0}')
+#         }
+#
+#         # 读取邮件配置（处理多个收件人）
+#         email_config = {
+#             'recipients': [addr.strip() for addr in config.get('Email', 'EMAIL1').split(',') if addr.strip()],
+#             # 拆分多个收件人
+#             'sender': config.get('Email', 'sender'),
+#             'sender_password': config.get('Email', 'sender_password'),
+#             'smtp_server': config.get('Email', 'smtp_server'),
+#             'smtp_port': config.getint('Email', 'smtp_port'),  # 端口转为整数
+#             'subject': config.get('Email', 'email_subject').replace('{日期}', datetime.now().strftime('%Y-%m-%d')),
+#             # 替换日期占位符
+#             'content': config.get('Email', 'email_content')
+#         }
+#
+#         # 检查必要邮件参数
+#         if not email_config['recipients']:
+#             raise Exception("Email配置中EMAIL1未填写收件人邮箱")
+#         if not all([email_config['sender'], email_config['sender_password'], email_config['smtp_server']]):
+#             raise Exception("Email配置中缺少发件人/密码/SMTP服务器")
+#
+#         logger.info("配置文件读取成功（数据库+邮件参数）")
+#         return db_config, email_config
+#
+#     except Exception as e:
+#         logger.error(f"读取配置文件失败：{str(e)}")
+#         raise  # 抛出异常终止程序，避免后续错误
+#
+#
+# # --------------------------
+# # 3. 从SQL Server获取存储过程结果
+# # --------------------------
+# def get_baobiao_gongfei_result(db_config):
+#     logger = logging.getLogger()
+#     conn = None
+#     try:
+#         # 建立数据库连接
+#         conn = pyodbc.connect(
+#             f"DRIVER={db_config['driver']};"
+#             f"SERVER={db_config['server']};"
+#             f"DATABASE={db_config['database']};"
+#             f"UID={db_config['username']};"
+#             f"PWD={db_config['password']};"
+#             "TDS_Version=8.0;timeout=30"  # 超时30秒，避免长时间阻塞
+#         )
+#         cursor = conn.cursor()
+#         logger.info(f"成功连接数据库：{db_config['server']}/{db_config['database']}")
+#
+#         # 执行存储过程（三个参数传NULL）
+#         cursor.execute("EXEC [dbo].[aa_baobiao_gongfei] ?, ?, ?", None, None, None)
+#         logger.info("存储过程 [dbo].[aa_baobiao_gongfei] 执行完成")
+#
+#         # 获取结果集（找到第一个有效结果）
+#         rows = []
+#         columns = []
+#         while True:
+#             if cursor.description:  # 存在列描述，说明是有效结果集
+#                 rows = cursor.fetchall()
+#                 columns = [col[0] for col in cursor.description]
+#                 logger.info(f"获取到结果集：{len(rows)} 条数据，{len(columns)} 个字段")
+#                 break
+#             # 没有结果集则切换到下一个（存储过程可能有中间临时操作）
+#             if not cursor.nextset():
+#                 break
+#
+#         # 转换为字典列表（便于后续处理）
+#         results = [dict(zip(columns, row)) for row in rows] if rows else []
+#         return results
+#
+#     except pyodbc.Error as e:
+#         logger.error(f"数据库错误：{str(e)}（错误代码：{e.args[0]}）")
+#         return None
+#     except Exception as e:
+#         logger.error(f"获取数据失败：{str(e)}")
+#         return None
+#     finally:
+#         # 关闭数据库连接
+#         if conn:
+#             conn.close()
+#             logger.info("数据库连接已关闭")
+#
+#
+# # --------------------------
+# # 4. 快速生成Excel文件（pyexcelerate效率高）
+# # --------------------------
+# def generate_excel(data, save_dir='.'):
+#     logger = logging.getLogger()
+#     if not data:
+#         logger.warning("无数据，无需生成Excel文件")
+#         return None
+#
+#     try:
+#         # 确保保存目录存在
+#         if not os.path.exists(save_dir):
+#             os.makedirs(save_dir)
+#
+#         # 生成Excel文件名（工费2025-08-25.xlsx）
+#         excel_filename = f"智导回款分析台账合并合计-工费-{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+#         excel_path = os.path.abspath(os.path.join(save_dir, excel_filename))
+#
+#         # 提取列名和数据
+#         columns = list(data[0].keys())
+#         rows_data = [list(row.values()) for row in data]
+#
+#         # 写入Excel（pyexcelerate比openpyxl更快）
+#         wb = Workbook()
+#         ws = wb.new_sheet("智导回款分析台账合并合计-工费", data=[columns] + rows_data)  # 工作表命名为“工费报表”
+#         wb.save(excel_path)
+#
+#         logger.info(f"Excel文件生成成功：{excel_path}（文件大小：{os.path.getsize(excel_path) / 1024:.1f} KB）")
+#         return excel_path  # 返回文件绝对路径，用于后续邮件附件
+#
+#     except Exception as e:
+#         logger.error(f"生成Excel失败：{str(e)}")
+#         return None
+#
+#
+# # --------------------------
+# # 5. 发送邮件（带Excel附件）
+# # --------------------------
+# def send_email_with_attachment(email_config, attachment_path):
+#     logger = logging.getLogger()
+#     if not os.path.exists(attachment_path):
+#         logger.error(f"附件文件不存在：{attachment_path}")
+#         return False
+#
+#     try:
+#         # 1. 构建邮件对象（带附件）
+#         msg = MIMEMultipart()
+#         # 发件人信息（格式：昵称<邮箱>）
+#         msg['From'] = formataddr(("智导回款分析台账合并合计-工费", email_config['sender']))
+#         # 收件人信息（用逗号连接多个邮箱）
+#         msg['To'] = ','.join(email_config['recipients'])
+#         # 邮件主题（支持中文，需用Header编码）
+#         msg['Subject'] = Header(email_config['subject'], 'utf-8')
+#
+#         # 2. 添加邮件正文（纯文本）
+#         msg.attach(MIMEText(email_config['content'], 'plain', 'utf-8'))
+#
+#         # 3. 添加Excel附件
+#         with open(attachment_path, 'rb') as f:
+#             # 读取文件内容，设置MIME类型为application/octet-stream（二进制流）
+#             attachment = MIMEText(f.read(), 'base64', 'utf-8')
+#             attachment["Content-Type"] = 'application/octet-stream'
+#             # 设置附件头（文件名需用Header编码，避免中文乱码）
+#             attachment.add_header(
+#                 'Content-Disposition',
+#                 'attachment',
+#                 filename=Header(os.path.basename(attachment_path), 'utf-8').encode()
+#             )
+#             msg.attach(attachment)
+#
+#         # 4. 连接SMTP服务器并发送邮件
+#         # 支持SSL加密（常用465端口）
+#         with smtplib.SMTP_SSL(email_config['smtp_server'], email_config['smtp_port']) as server:
+#             # 登录发件人邮箱
+#             server.login(email_config['sender'], email_config['sender_password'])
+#             # 发送邮件（from_addr, to_addrs, msg.as_string()）
+#             server.sendmail(
+#                 email_config['sender'],
+#                 email_config['recipients'],  # 收件人列表（必须是list）
+#                 msg.as_string()
+#             )
+#
+#         logger.info(
+#             f"邮件发送成功！收件人：{','.join(email_config['recipients'])}，附件：{os.path.basename(attachment_path)}")
+#         return True
+#
+#     except smtplib.SMTPException as e:
+#         logger.error(f"邮件发送失败（SMTP错误）：{str(e)}")
+#         return False
+#     except Exception as e:
+#         logger.error(f"邮件发送失败：{str(e)}")
+#         return False
+#
+#
+# # --------------------------
+# # 6. 主程序流程（串联所有步骤）
+# # --------------------------
+# if __name__ == "__main__":
+#     # 初始化日志
+#     logger = init_logging()
+#     logger.info("=" * 50)
+#     logger.info("工费报表生成与邮件发送程序启动")
+#     logger.info("=" * 50)
+#
+#     # 初始化变量（记录最终状态）
+#     excel_path = None
+#     try:
+#         # 步骤1：读取配置（数据库+邮件）
+#         db_config, email_config = read_config()
+#
+#         # 步骤2：从数据库获取存储过程结果
+#         data = get_baobiao_gongfei_result(db_config)
+#         if not data:
+#             logger.warning("未获取到任何数据，程序终止")
+#             exit(1)  # 无数据则退出，避免后续无效操作
+#
+#         # 步骤3：生成Excel文件
+#         excel_path = generate_excel(data)
+#         if not excel_path:
+#             logger.error("Excel文件生成失败，程序终止")
+#             exit(1)
+#
+#         # 步骤4：发送邮件（带Excel附件）
+#         send_success = send_email_with_attachment(email_config, excel_path)
+#         if not send_success:
+#             logger.error("邮件发送失败，但Excel文件已生成（路径：{excel_path}）")
+#         else:
+#             logger.info("程序执行完成：Excel生成+邮件发送均成功")
+#
+#     except Exception as e:
+#         logger.error(f"程序异常终止：{str(e)}", exc_info=True)  # exc_info=True记录完整堆栈信息
+#     finally:
+#         logger.info("=" * 50)
+#         logger.info("程序执行结束")
+#         logger.info("=" * 50)
+#         # 关闭所有日志处理器（确保日志写入完成）
+#         for handler in logging.getLogger().handlers:
+#             handler.close()
