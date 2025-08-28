@@ -165,10 +165,108 @@ def get_baobiao_gongfei_result():
             conn.close()
             logger.info("数据库连接已关闭")
 
+#  智导回分析台帐合并合计一含采购申请销售回款及付款情况  aa_baobiao_fukuan
+def get_baobiao_fukuan_result():
+    logger = logging.getLogger()
+    conn = None
+    try:
+        db_config = read_db_config()
+        conn = pyodbc.connect(
+            f"DRIVER={db_config['driver']};"
+            f"SERVER={db_config['server']};"
+            f"DATABASE={db_config['database']};"
+            f"UID={db_config['username']};"
+            f"PWD={db_config['password']};"
+            "TDS_Version=8.0"
+        )
+        cursor = conn.cursor()
+        logger.info("成功连接数据库并创建游标")
+
+        cursor.execute("EXEC [dbo].[aa_baobiao_fukuan] ?", None)
+        logger.info("已执行存储过程 [dbo].[aa_baobiao_fukuan]")
+
+        rows = []
+        columns = []
+        while True:
+            if cursor.description:  # 找到第一个有效结果集
+                rows = cursor.fetchall()
+                columns = [col[0] for col in cursor.description]
+                logger.info(f"成功获取结果集，共 {len(rows)} 条数据")
+                break
+            if not cursor.nextset():
+                break
+
+        results = [dict(zip(columns, row)) for row in rows] if rows else []
+        return results
+
+    except pyodbc.Error as e:
+        logger.error(f"数据库错误: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"执行错误: {str(e)}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+            logger.info("数据库连接已关闭")
 
 
+import os
+import smtplib
+import logging
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 
-# ============ 发送邮件 ============
+
+# ============ 发送邮件--多个文件 附件  ============
+def send_mail_with_attachments(filenames):
+    """
+    发送带多个附件的邮件
+    :param filenames: list[str] 文件路径列表
+    """
+    try:
+        mail_config = read_email_config()
+
+        msg = MIMEMultipart()
+        msg['From'] = mail_config['sender']
+        msg['To'] = ",".join(mail_config['receivers'])
+        msg['Subject'] = "智导回款分析台账-工费报表等"
+
+        # 邮件正文
+        body = MIMEText("请查收附件：智导回款分析台账-工费报表等", 'plain', 'utf-8')
+        msg.attach(body)
+
+        # 遍历添加附件
+        for file in filenames:
+            if not os.path.exists(file):
+                logging.warning(f"附件不存在，已跳过: {file}")
+                continue
+            with open(file, 'rb') as f:
+                attachment = MIMEApplication(f.read(), Name=os.path.basename(file))
+            attachment['Content-Disposition'] = f'attachment; filename="{os.path.basename(file)}"'
+            msg.attach(attachment)
+
+        # 发送邮件
+        if mail_config['port'] == 465:
+            server = smtplib.SMTP_SSL(mail_config['smtp_server'], mail_config['port'])
+            server.login(mail_config['sender'], mail_config['password'])
+            server.sendmail(mail_config['sender'], mail_config['receivers'], msg.as_string())
+        else:
+            server = smtplib.SMTP(mail_config['smtp_server'], mail_config['port'])
+            server.starttls()
+            server.login(mail_config['username'], mail_config['password'])
+            server.sendmail(mail_config['sender'], mail_config['receivers'], msg.as_string())
+
+        logging.info(f"邮件发送成功，附件: {filenames}，收件人: {mail_config['receivers']}")
+        return True
+
+    except Exception as e:
+        logging.error(f"邮件发送失败: {e}")
+        return False
+
+
+# ============ 发送邮件--单个文件 附件  ============
 def send_mail_with_attachment(filename):
     try:
         mail_config = read_email_config()
@@ -230,6 +328,23 @@ def mainjob():
     finally:
         logger.info("mainjob执行结束")
 
+    try:
+        data = get_baobiao_fukuan_result()
+        if data:
+            logger.info(f"成功获取 {len(data)} 条数据")
+            # 日志中记录前2条数据示例
+            for i, row in enumerate(data[:2]):
+                logger.info(f"第{i + 1}条数据示例: {str(row)}")
+
+            filename = f"智导回分析台帐合并合计一含采购申请销售回款及付款情况-{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+            save_to_excel_fast(data, filename)
+            send_mail_with_attachment(filename)
+        else:
+            logger.warning("未能获取数据")
+    except Exception as e:
+        logger.error(f"mainjob执行出错: {str(e)}", exc_info=True)
+    finally:
+        logger.info("mainjob执行结束")
 
 if __name__ == "__main__":
     # 初始化日志
